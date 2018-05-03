@@ -1,0 +1,510 @@
+library(shiny)
+library(shinydashboard)
+library(rvest)
+library(purrr)
+library(tidyverse)
+library(tidytext)
+library(tokenizers)
+library(rlist)
+library(tm)
+library(DT)
+library(dplyr)
+library(ggplot2)
+library(rpart)
+
+
+#list of the tags
+tagList <- list("service","price","handling","interior")
+
+# Scrapping the data from the link provided
+getData <- function(yearList){
+  link <-"https://www.cars.com/research/toyota-camry-%d/consumer-reviews/?pg=%dnr=100"
+  map_df(yearList, function(j) {
+    review <- data.frame()
+    i = 0
+    while (i >= 0) {
+      cat(".")
+      i = i + 1
+      pg <- read_html(sprintf(link, j, i))
+      data <- data.frame(Review=html_text(html_nodes(pg, ".mmy-reviews__blurb")),
+                         Rating=as.numeric(html_attr(html_nodes(pg, ".cr-star-rating"), name = "rating")),
+                         stringsAsFactors=FALSE)
+      
+      review <- rbind(data, review)
+      if(nrow(data) == 0){
+        i = -1
+      }
+    }
+    
+    # creating the review dataframe
+    review <- unique(review)
+    count1 <- nrow(review)
+    Year <- rep(j,count1)
+    review <-cbind(Year,review)
+    
+    #cleaning the data by removing the punctuation
+ 
+    for( i in 1:count1){
+      data <- review[,2][i]
+      cleanReviewData <- gsub("\n|[\t]|[0-9]", "", removePunctuation(data))
+      
+      #Tokenizing it into words
+      wordsList <- tokenize_words(data)[[1]]
+      
+      # Tgging each review with one of the 4 tags
+      string1 <- ""
+      string2 <- ""
+      for(k in 1:length(wordsList)){
+        require(stringdist)
+        index <- amatch(wordsList[k], tagList)
+        if ((is.na(index) || index == '') == FALSE && length(grep(tagList[index], string1)) == 0){
+          string1 <- paste(string1, tagList[index], sep = ",")
+          string2 <- substring(string1,2)
+        }
+      }
+      
+      #
+      review[i,4] <- tolower(cleanReviewData)
+      review[i,5] <- string2
+      
+      #Tokenizing into words
+      text_df <- data_frame(line = 1:4, text = data)
+      x <-text_df %>%
+        unnest_tokens(word, text)
+
+
+      #Getting the afinn score
+      nrcjoy <- get_sentiments("afinn") 
+      y <- x %>%
+        inner_join(nrcjoy, by = "word") 
+      l <- mean(y$score)
+      if (is.nan(l) == FALSE){
+        review[i,6] <- l
+      }
+      else{
+        review[i,6] <- 0
+      }
+    }
+    review
+    
+  }) -> reviews
+  
+ #Normalizing the Rating and afinn scores 
+  score <- reviews[,6]
+  maxvalue <- max(score)
+  minvalue <- min(score)
+  range<-maxvalue-minvalue
+  
+  score1 <- reviews[,3]
+  maxvalue1 <- max(score1)
+  minvalue1 <- min(score1)
+  range1<-maxvalue1-minvalue1
+  
+  for( j in 1:length(score)){
+    new_value <- (score[j]-minvalue)/range
+    new_value1 <- (score1[j]-minvalue1)/range1
+    reviews[j,7] <- new_value
+    reviews[j,8] <- new_value1
+  }
+  
+  #Naming the columns
+  colnames(reviews)[4] <-"Normalised_Review"
+  colnames(reviews)[5] <-"Tags"
+  colnames(reviews)[6] <-"Afinn_Score"
+  colnames(reviews)[7] <-"Afinn_Score_Normalized"
+  colnames(reviews)[8] <-"Rating_Normalized"
+  
+  return (reviews)
+}
+
+#train and test data
+trainYearList <- list(2012,2013,2014,2015,2016)
+testYearList <- list(2017)
+
+#Calling the functions getData() to fetch the test and train data
+cat("loading")
+trainData <- getData(trainYearList)
+testData <- getData(testYearList)
+
+ui <- 
+  dashboardPage(
+    skin = "yellow",
+    dashboardHeader(title = "Sanjana Banda_NLP", titleWidth = 400,
+                    dropdownMenu(
+                      type = "notifications", 
+                      icon = icon("question-circle"),
+                      badgeStatus = NULL,
+                      headerText = "See also:",
+                      
+                      notificationItem("Natural Language Processing", icon = icon("file"),
+                                       href = 'https://www.tidytextmining.com/'),
+                      notificationItem("shinydashboard", icon = icon("file"),
+                                       href = "https://rstudio.github.io/shinydashboard/")
+                    )),
+    dashboardSidebar(
+      sidebarMenu(id = "sidebarmenu",
+                  menuItem("Train Data", tabName = "train_data",
+                           menuSubItem('Train Table', tabName = 'train_table'),
+                           menuSubItem('Normalized Review', tabName = 'train_normalized_review'),
+                           menuSubItem('Tags', tabName = 'train_tags')),
+                  menuItem("Test Data", tabName = "test_data",
+                           menuSubItem('Test Table', tabName = 'test_table'),
+                           menuSubItem('Normalized Review', tabName = 'test_normalized_review'),
+                           menuSubItem('Tags', tabName = 'test_tags')),
+                  menuItem("Sentiment Analysis", tabName = "sentiment_analysis",
+                           menuSubItem('Sentiment Rating', tabName = 'train_sentiment_rating'),
+                           menuSubItem('Average Sentiment Rating', tabName = 'train_average_sentiment_rating'),
+                           menuSubItem('Average Star Rating', tabName = 'train_average_star_rating'),
+                           menuSubItem('Summary', tabName = 'train_sentiment_analysis_summary')),
+                  menuItem("Tags", tabName = "tags",
+                           menuSubItem('Service', tabName = 'service'),
+                           menuSubItem('Price', tabName = 'price'),
+                           menuSubItem('Handling', tabName = 'handling'),
+                           menuSubItem('Interior', tabName = 'interior'),
+                           menuSubItem('Summary', tabName = 'tags_summary')),
+                  menuItem("Model", tabName = "train_model" , 
+                           menuSubItem('Accuracy', tabName = 'Accuracy'),
+                           menuSubItem('Table', tabName = 'accuracyTableo')),
+                  menuItem("TF-IDF", tabName = "train_tfidf", 
+                           menuSubItem('Table', tabName = 'tf_idf_table'),
+                           menuSubItem('Plot', tabName = 'tfidf_plot'))
+                
+      )
+    ),
+    dashboardBody(
+      tabItems(
+        tabItem(tabName = "train_table",
+                fluidRow(
+                  DT::dataTableOutput("TrainTable")
+                )
+        ),
+        tabItem(tabName = "train_normalized_review",
+                fluidRow(
+                  DT::dataTableOutput("TrainNormalizedTable")
+                )
+        ),
+        tabItem(tabName = "train_tags",
+                fluidRow(
+                  DT::dataTableOutput("TrainTagTable")
+                )
+        ),
+        tabItem(tabName = "test_table",
+                fluidRow(
+                  DT::dataTableOutput("TestTable")
+                )
+        ),
+        tabItem(tabName = "test_normalized_review",
+                fluidRow(
+                  DT::dataTableOutput("TestNormalizedTable")
+                )
+        ),
+        tabItem(tabName = "test_tags",
+                fluidRow(
+                  DT::dataTableOutput("TestTagTable")
+                )
+        ),
+        tabItem(tabName = "train_sentiment_rating",
+                fluidRow(
+                  DT::dataTableOutput("SentimentAnlaysisTable")
+                )
+        ),
+        tabItem(tabName = "train_average_sentiment_rating",
+                fluidRow(
+                  DT::dataTableOutput("AverageSentimentRatingTable")
+                )
+        ),
+        tabItem(tabName = "train_average_star_rating",
+                fluidRow(
+                  DT::dataTableOutput("AverageStarRatingTable")
+                )
+        ),
+        tabItem(tabName = "service",
+                fluidRow(
+                  DT::dataTableOutput("serviceTable")
+                )
+        ),
+        tabItem(tabName = "price",
+                fluidRow(
+                  DT::dataTableOutput("priceTable")
+                )
+        ),
+        tabItem(tabName = "handling",
+                fluidRow(
+                  DT::dataTableOutput("handlingTable")
+                )
+        ),
+        tabItem(tabName = "interior",
+                fluidRow(
+                  DT::dataTableOutput("interiorTable")
+                )
+        ),
+        tabItem(tabName = "tags_summary",
+                fluidRow(
+                  h4(htmlOutput("txtoutTags"))
+                )
+        ),
+        tabItem(tabName = "train_sentiment_analysis_summary",
+                fluidRow(
+                  h4(htmlOutput("txtoutSenti"))
+                )
+        ),
+        tabItem(tabName = "tf_idf_table",
+                fluidRow(
+                  DT::dataTableOutput("tfidfTable")
+                )
+        ),
+        tabItem(tabName = "tfidf_plot",
+                  fluidRow(
+                    plotOutput("tfidfPlot")
+                  )
+        ),
+        tabItem(tabName = "Accuracy",
+                fluidRow(
+                  h4(htmlOutput("txtoutAccuracy"))
+                )),
+        tabItem(tabName = "accuracyTableo",
+                fluidRow(
+                  DT::dataTableOutput("accuracyTable")
+                )
+        )
+      )
+    )
+  )
+
+server <- function(input, output, session) {
+  
+  ####### Table of TF-IDF Score #############
+  getTFidf <- function(){
+    df <- data_frame()
+    for( i in 1:nrow(trainData)){
+      for(j in 1:length(tagList)){
+        if(grepl(tagList[j], trainData$Tags[i])){
+          rowNumber <- nrow(df) + 1
+          df[rowNumber, 1] = trainData$Normalised_Review[i]
+          df[rowNumber, 2] = tagList[j]
+        }
+      }
+    }
+    colnames(df)[1] <- "text"
+    colnames(df)[2] <- "Tag"
+    
+    # Removing Stop Words
+    df$text <- removeWords(df$text, stopwords("english"))
+
+    
+    
+    #Tokenizing the reviews
+    Tag_words <- df %>%
+      unnest_tokens(word, text) %>%
+      count(Tag, word, sort = TRUE) %>%
+      ungroup()
+    
+    #Removing stop words
+    data(stop_words)
+    
+    Tag_words <- Tag_words %>%
+                  anti_join(stop_words, by = "word")
+    
+    
+    #Grouping according to the Tag and applying join
+    total_words <- Tag_words %>% group_by(Tag) %>% summarize(total = sum(n))
+    Tag_words <- left_join(Tag_words, total_words)
+    Tag_words
+    
+    #Using the blind_tf_idf function
+    Tag_words <- Tag_words %>%
+      bind_tf_idf(word, Tag, n)
+    Tag_words
+    
+    #Arranfing in descending order
+    Tag_words <-Tag_words %>%
+      select(-total) %>%
+      arrange(desc(tf_idf))
+    
+    return(Tag_words)
+  }
+  
+  ######### Output Tables ############   
+  output$TrainTable <- DT::renderDataTable({
+    subset(trainData, select = c("Year", "Review", "Rating"))
+  })
+  
+  output$TrainNormalizedTable <- DT::renderDataTable({
+    subset(trainData, select = c("Year", "Review", "Rating", "Normalised_Review"))
+  })
+  
+  output$TrainTagTable <- DT::renderDataTable({
+    subset(trainData, select = c("Year", "Review", "Rating", "Normalised_Review","Tags"))
+  })
+  
+  output$TestTable <- DT::renderDataTable({
+    subset(testData, select = c("Year", "Review", "Rating"))
+  })
+  
+  output$TestNormalizedTable <- DT::renderDataTable({
+    subset(testData, select = c("Year", "Review", "Rating", "Normalised_Review"))
+  })
+  
+  output$TestTagTable <- DT::renderDataTable({
+    subset(testData, select = c("Year", "Review", "Rating", "Normalised_Review","Tags"))
+  })
+  
+  output$SentimentAnlaysisTable <- DT::renderDataTable({
+    subset(trainData, select = c("Year", "Review", "Rating", "Normalised_Review","Tags","Afinn_Score"))
+  })
+  
+  output$AverageSentimentRatingTable <- DT::renderDataTable({
+    subset(trainData, select = c("Afinn_Score","Afinn_Score_Normalized"))
+  })
+  
+  output$AverageStarRatingTable <- DT::renderDataTable({
+    subset(trainData, select = c( "Rating","Rating_Normalized" ))
+  })
+  
+  output$serviceTable <- DT::renderDataTable({
+    dplyr::filter(trainData, grepl("service",Tags)) %>% select("Tags" ,"Rating","Afinn_Score")
+  })
+  
+  output$priceTable <- DT::renderDataTable({
+    dplyr::filter(trainData, grepl("price",Tags)) %>% select("Tags" ,"Rating","Afinn_Score")
+  })
+  
+  output$interiorTable <- DT::renderDataTable({
+    dplyr::filter(trainData, grepl("interior",Tags)) %>% select("Tags" ,"Rating","Afinn_Score")
+  })
+  
+  output$handlingTable <- DT::renderDataTable({
+    dplyr::filter(trainData, grepl("handling",Tags)) %>% select("Tags" ,"Rating","Afinn_Score")
+  })
+  
+  output$tfidfTable <- DT::renderDataTable({
+    getTFidf()
+  })
+  
+  ##### Output Plot for Top 10 words with TF-IDF ######
+  output$tfidfPlot <- renderPlot({
+    Tag_words <- getTFidf()
+    
+   #plot for the top 10 words with highest tf_idf in each tag 
+   plot <-  Tag_words %>%
+      arrange(desc(tf_idf)) %>%
+      mutate(word = factor(word, levels = rev(unique(word)))) %>% 
+      group_by(Tag) %>% 
+      top_n(10) %>% 
+      ungroup %>%
+      ggplot(aes(word, tf_idf, fill = Tag)) +
+      geom_col(show.legend = FALSE) +
+      labs(x = NULL, y = "tf-idf") +
+      facet_wrap(~Tag, ncol = 2, scales = "free") +
+      coord_flip()
+   return(plot)
+    
+  })
+  #Summary
+  output$txtoutTags <- renderUI({
+  serviceData <- dplyr::filter(trainData, grepl("service",Tags)) %>% select("Rating" ,"Afinn_Score")
+  priceData <- dplyr::filter(trainData, grepl("price",Tags)) %>% select("Rating" ,"Afinn_Score")
+  interiorData <- dplyr::filter(trainData, grepl("interior",Tags)) %>% select("Rating" ,"Afinn_Score")
+  handlingData <- dplyr::filter(trainData, grepl("handling",Tags)) %>% select("Rating" ,"Afinn_Score")
+  
+  txt1 <- "        Average of  Afinn_Score = %f"
+  txt2 <- "        Average of Rating = %f"
+  txt3 <- " here we find out the mean of Afinn_Score and mean of star rating for each tag 
+            After Normalization we can find that the mean of star rating is greater than mean
+  of Afinn score for each tag"
+  
+  HTML(paste("Service: ", 
+             sprintf(txt1, mean(serviceData$Afinn_Score)),
+             sprintf(txt2, mean(serviceData$Rating)),
+             "Price: ", 
+             sprintf(txt1, mean(priceData$Afinn_Score)),
+             sprintf(txt2, mean(priceData$Rating)),
+             "Interior: ", 
+             sprintf(txt1, mean(interiorData$Afinn_Score)),
+             sprintf(txt2, mean(interiorData$Rating)),
+             "Handling: ", 
+             sprintf(txt1, mean(handlingData$Afinn_Score)),
+             sprintf(txt2, mean(handlingData$Rating)),
+             " ",
+             txt3,
+             sep = '<br/>'))
+  })
+  
+  output$txtoutSenti <- renderUI({
+    txt1 <- "        Average of Afinn_Score = %f"
+    txt2 <- "        Average of Ratings = %f"
+    txt3 <- "The mean Afinn score can be compared to mean star rating only after normalizing 
+            both the values between 0 to 1 , from the observation the mean of star rating is 
+            greater than mean of afinn score"
+  
+    HTML(paste("Summary: ", 
+               sprintf(txt1, mean(trainData$Afinn_Score)),
+               sprintf(txt2, mean(trainData$Rating)),
+               " ",
+               txt3,
+               sep = '<br/>'))
+  })
+  
+  output$txtoutAccuracy <- renderUI({
+    #logistic regression
+    mydata <- trainData
+    
+    str(mydata)
+    
+    mydata$Rating <- factor(mydata$Rating)
+    mydata$out <- relevel(mydata$Rating, ref = '1')
+    
+    
+    library(nnet)
+    
+    mymodel <- multinom(out ~ Afinn_Score , data = mydata)
+    summary(mymodel)
+    
+    
+    predict(mymodel,mydata)
+    Rating_predicted <- as.numeric(predict(mymodel,testData))
+    Rating_predicted <- as.data.frame(Rating_predicted)
+    
+    table <- cbind(testData$Afinn_Score,Rating_predicted)
+    
+    cm <- table(predict(mymodel),mydata$Rating)
+    Accuracy <- 1-(1-sum(diag(cm))/sum(cm))
+    
+    txt1 <- sprintf("Accuracy of the model = %f", Accuracy)
+    
+    txt2 <- " We have used multinomial logistic regression , the independent variable afinn score is 
+              continous and the dependent variable star rating is ordinal with 5 levels from 1 to 5
+    We have seen a accuracy nearly 70% , which is good number to predict the star rating for 
+    each review in the test data, we can further optimize the model by using classification models 
+    such as Decision trees and random forest or by using support vector machine.
+    "
+    HTML(paste(txt1, " ",txt2, sep = '<br/>'))
+  })
+  
+  output$accuracyTable <- DT::renderDataTable({
+    mydata <- trainData
+    
+    str(mydata)
+    
+    mydata$Rating <- factor(mydata$Rating)
+    mydata$out <- relevel(mydata$Rating, ref = '1')
+    
+    library(nnet)
+    
+    mymodel <- multinom(out ~ Afinn_Score , data = mydata)
+    summary(mymodel)
+    
+    predict(mymodel,mydata)
+    Rating_predicted <- as.numeric(predict(mymodel,testData))
+    Rating_predicted <- as.data.frame(Rating_predicted)
+    
+    table <- cbind(testData$Afinn_Score,Rating_predicted)
+    table
+  })
+  
+  
+}
+
+
+
+shinyApp(ui = ui, server = server)
